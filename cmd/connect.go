@@ -29,7 +29,7 @@ var connectCmd = &cobra.Command{
 		count, _ := cmd.Flags().GetInt("count")
 		async, _ := cmd.Flags().GetBool("async")
 		threads, _ := cmd.Flags().GetInt("threads")
-		fmt.Printf("Connecting to %s [%d connections]\n", uri, count)
+		fmt.Printf("Connecting to %s\n", uri)
 		fmt.Println()
 
 		// Read client certificate and key
@@ -89,7 +89,7 @@ var connectCmd = &cobra.Command{
 				}()
 			}
 
-			for i := 0; i <= count; i++ {
+			for i := 0; i < count; i++ {
 				c <- struct{}{}
 			}
 			close(c)
