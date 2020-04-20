@@ -8,12 +8,15 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/spf13/cobra"
 )
 
 var (
 	server []string
+	wg     sync.WaitGroup
+	c      chan struct{}
 )
 
 // connectCmd represents the connect command
@@ -63,11 +66,37 @@ var connectCmd = &cobra.Command{
 		fmt.Println()
 
 		if async {
+			count = threads * 4
 			fmt.Println("Asynchronous test initiated")
-			fmt.Printf("Creating a pool of %d threads. Setting count to 3x the number of threads [%d called | %d to be run]\n", threads, count, (count * 3))
+			fmt.Printf("Creating a pool of %d threads\n", threads)
+			fmt.Printf("Overriding --count. Count will be %d [4 x %d threads]\n", count, threads)
+
+			wg.Add(threads)
+			c = make(chan struct{}, threads)
+			for i := 0; i < threads; i++ {
+				go func() {
+					for range c {
+						r, err := client.Get(uri)
+						if err != nil {
+							fmt.Printf("[ERR] Could not connect to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
+							return
+						}
+						io.Copy(ioutil.Discard, r.Body)
+						r.Body.Close()
+						fmt.Printf("[OK] Connected to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
+					}
+					wg.Done()
+				}()
+			}
+
+			for i := 0; i <= count; i++ {
+				c <- struct{}{}
+			}
+			close(c)
+			wg.Wait()
 		} else {
 			fmt.Println("Syncronous test initiated")
-			for i := 0; i <= count; i++ {
+			for i := 0; i < count; i++ {
 				r, err := client.Get(uri)
 				if err != nil {
 					fmt.Printf("[ERR] Could not connect to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
