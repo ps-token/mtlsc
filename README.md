@@ -52,7 +52,7 @@ To make asynchronous calls, run the command as:
 $ mtlsc connect https://test-ingress.local \
 --server minica.pem,test-ingress.local/cert.pem \
 --cert client-cert/cert.pem --key client-cert/key.pem \
---async
+--async \
 --threads 4
 ```
 
