@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"runtime"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -69,7 +70,7 @@ var connectCmd = &cobra.Command{
 			count = threads * 4
 			fmt.Println("Asynchronous test initiated")
 			fmt.Printf("Creating a pool of %d threads\n", threads)
-			fmt.Printf("Overriding --count. Count will be %d [4 x %d threads]\n", count, threads)
+			fmt.Printf("Overriding --count. Count will be %d [4 x %d threads] [CPU threads: %d]\n", count, threads, runtime.NumCPU())
 
 			wg.Add(threads)
 			c = make(chan struct{}, threads)
@@ -116,7 +117,7 @@ func init() {
 	rootCmd.AddCommand(connectCmd)
 	connectCmd.Flags().Int("count", 10, "The amount of connections to execute during the test")
 	connectCmd.Flags().Bool("async", false, "Run tests asyncronously")
-	connectCmd.Flags().Int("threads", 4, "The amount of threads to give to the client for asynchronous testing")
+	connectCmd.Flags().Int("threads", runtime.NumCPU()/2, "The amount of threads to give to the client for asynchronous testing")
 	connectCmd.Flags().StringSliceVarP(&server, "server", "", []string{}, "Path(s) to server side bundle or CA cert, intermediataries and leaf certificates (required)")
 	connectCmd.Flags().String("cert", "", "Path to your client-side certificate (required)")
 	connectCmd.Flags().String("key", "", "Path to your client-side key (required)")
