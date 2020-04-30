@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"runtime"
 	"sync"
 
@@ -15,10 +16,35 @@ import (
 )
 
 var (
-	server []string
-	wg     sync.WaitGroup
-	c      chan struct{}
+	count       int
+	concurrency int
+	cert        string
+	key         string
+	server      []string
+	wg          sync.WaitGroup
+	c           chan struct{}
+	successes   int
 )
+
+func certificatePool(server []string) *x509.CertPool {
+	caCertPool := x509.NewCertPool()
+	for _, v := range server {
+		serverCert, err := ioutil.ReadFile(v)
+		if err != nil {
+			log.Fatal(err)
+		}
+		caCertPool.AppendCertsFromPEM(serverCert)
+	}
+	return caCertPool
+}
+
+func clientCertificate(cert, key string) tls.Certificate {
+	certificate, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return certificate
+}
 
 // connectCmd represents the connect command
 var connectCmd = &cobra.Command{
@@ -26,101 +52,82 @@ var connectCmd = &cobra.Command{
 	Short: "Connect to a host and test mTLS",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+		if concurrency == 0 || count == 0 {
+			fmt.Println("[ERR] Cannot have 0 goroutines or 0 requests.")
+			os.Exit(1)
+		}
+
 		uri := args[0]
-		count, _ := cmd.Flags().GetInt("count")
-		async, _ := cmd.Flags().GetBool("async")
-		threads, _ := cmd.Flags().GetInt("threads")
-		fmt.Printf("Connecting to %s\n", uri)
-		fmt.Println()
+
+		fmt.Printf("Testing mTLS to %s\n\n", uri)
 
 		// Read client certificate and key
-		certificate, _ := cmd.Flags().GetString("cert")
-		key, _ := cmd.Flags().GetString("key")
-		cert, err := tls.LoadX509KeyPair(certificate, key)
-		if err != nil {
-			log.Fatal(err)
-		}
+		certificate := clientCertificate(cert, key)
 		fmt.Println("[OK] Read client certificate and key")
 
-		// Read server certs and add to a cert pool
-		fmt.Println("[OK] Created Certificate Pool")
-		caCertPool := x509.NewCertPool()
-		for _, v := range server {
-			serverCert, err := ioutil.ReadFile(v)
-			if err != nil {
-				log.Fatal(err)
-			}
-			caCertPool.AppendCertsFromPEM(serverCert)
-			fmt.Printf("[OK] Added %s to certificate pool\n", v)
-		}
-
+		pool := certificatePool(server)
 		client := &http.Client{
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
-					RootCAs:      caCertPool,
-					Certificates: []tls.Certificate{cert},
+					RootCAs: pool,
+					// Certificates: []tls.Certificate{certificate},
+					GetClientCertificate: func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+						return &certificate, nil
+					},
+					Renegotiation:      tls.RenegotiateOnceAsClient,
+					InsecureSkipVerify: insecure,
 				},
 			},
 		}
-
 		fmt.Println("[OK] Initialized HTTP Client")
-		fmt.Println()
 
-		if async {
-			count = threads * 4
-			fmt.Println("Asynchronous test initiated")
-			fmt.Printf("Creating a pool of %d threads\n", threads)
-			fmt.Printf("Overriding --count. Count will be %d [4 x %d threads] [CPU threads: %d]\n", count, threads, runtime.NumCPU())
+		fmt.Printf("\n[OK] Initiating test [%d connections | %d tests per connection]\n\n", concurrency, count)
 
-			wg.Add(threads)
-			c = make(chan struct{}, threads)
-			for i := 0; i < threads; i++ {
-				go func() {
-					for range c {
-						r, err := client.Get(uri)
-						if err != nil {
-							fmt.Printf("[ERR] Could not connect to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
-							return
-						}
-						io.Copy(ioutil.Discard, r.Body)
-						r.Body.Close()
-						fmt.Printf("[OK] Connected to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
+		wg.Add(concurrency)
+		c = make(chan struct{}, concurrency)
+		for i := 0; i < concurrency; i++ {
+			if debug {
+				fmt.Printf("[DEBUG] Concurrency loop %d\n", i)
+			}
+			go func() {
+				for range c {
+					r, err := client.Get(uri)
+					if err != nil {
+						fmt.Printf("[ERR] Response => [HTTP %d %s]\n", r.StatusCode, http.StatusText(r.StatusCode))
+						return
 					}
-					wg.Done()
-				}()
-			}
-
-			for i := 0; i < count; i++ {
-				c <- struct{}{}
-			}
-			close(c)
-			wg.Wait()
-		} else {
-			fmt.Println("Syncronous test initiated")
-			for i := 0; i < count; i++ {
-				r, err := client.Get(uri)
-				if err != nil {
-					fmt.Printf("[ERR] Could not connect to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
-					return
+					// force response body closure to ensure session reuse.
+					io.Copy(ioutil.Discard, r.Body)
+					r.Body.Close()
+					fmt.Printf("[OK] Response => [HTTP %d %s]\n", r.StatusCode, http.StatusText(r.StatusCode))
+					successes++
 				}
-				io.Copy(ioutil.Discard, r.Body)
-				r.Body.Close()
-				fmt.Printf("[OK] Connected to %s [HTTP %d %s]\n", uri, r.StatusCode, http.StatusText(r.StatusCode))
-			}
+				defer wg.Done()
+			}()
 		}
 
-		fmt.Println("\n[OK] Test complete")
+		requests := concurrency * count
+		for i := 0; i < requests; i++ {
+			if debug {
+				fmt.Printf("[DEBUG] Request loop %d\n", i)
+			}
+			c <- struct{}{}
+		}
+		close(c)
+		wg.Wait()
+
+		fmt.Printf("\n[OK] %d/%d tests passed\n", successes, concurrency*count)
+		fmt.Println("[OK] Test complete")
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(connectCmd)
-	connectCmd.Flags().Int("count", 10, "The amount of connections to execute during the test")
-	connectCmd.Flags().Bool("async", false, "Run tests asyncronously")
-	connectCmd.Flags().Int("threads", runtime.NumCPU()/2, "The amount of threads to give to the client for asynchronous testing")
+	connectCmd.Flags().IntVarP(&count, "count", "", 5, "The amount of connections to execute during the test")
+	connectCmd.Flags().IntVarP(&concurrency, "concurrency", "", runtime.NumCPU()/2, "The number of concurrent connections to use for the test")
 	connectCmd.Flags().StringSliceVarP(&server, "server", "", []string{}, "Path(s) to server side bundle or CA cert, intermediataries and leaf certificates (required)")
-	connectCmd.Flags().String("cert", "", "Path to your client-side certificate (required)")
-	connectCmd.Flags().String("key", "", "Path to your client-side key (required)")
+	connectCmd.Flags().StringVarP(&cert, "cert", "", "", "Path to your client-side certificate (required)")
+	connectCmd.Flags().StringVarP(&key, "key", "", "", "Path to your client-side key (required)")
 
 	// Mark flags as required
 	connectCmd.MarkFlagRequired("server")
